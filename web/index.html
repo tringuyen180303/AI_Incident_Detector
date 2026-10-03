@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Incident Detector</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1915;
+      --muted: #5c564c;
+      --line: #e4ddd2;
+      --paper: #f7f3ec;
+      --card: #fffdf9;
+      --high: #9f2d2d;
+      --medium: #8a5a12;
+      --low: #2f5d50;
+      --open: #9f2d2d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.5 "Iowan Old Style", Palatino, Georgia, serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    main { max-width: 920px; margin: 0 auto; padding: 40px 20px 80px; }
+    .eyebrow {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    h1 { margin: 6px 0 8px; font-size: 36px; font-weight: 560; letter-spacing: -0.03em; }
+    .lede { margin: 0 0 20px; color: var(--muted); max-width: 68ch; }
+    .path {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin: 0 0 18px;
+    }
+    .path div {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .path strong { display: block; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; }
+    .path span { color: var(--muted); font-size: 14px; }
+    #stats { color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 14px; }
+    .empty, .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-top: 12px;
+    }
+    .card header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    h2 { margin: 0; font-size: 22px; }
+    .meta { margin: 4px 0 10px; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; }
+    .badge {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      font-size: 12px;
+      border-radius: 999px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+    }
+    .high { color: var(--high); }
+    .medium { color: var(--medium); }
+    .low { color: var(--low); }
+    .summary { margin: 0 0 12px; }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      background: #f3eee6;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .samples { margin-top: 8px; }
+    .actions { display: flex; gap: 8px; margin-top: 12px; }
+    button {
+      font: 14px/1 ui-sans-serif, system-ui, sans-serif;
+      background: var(--ink);
+      color: white;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.4; cursor: default; }
+    @media (max-width: 700px) {
+      .path { grid-template-columns: 1fr; }
+      h1 { font-size: 30px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">AI Incident Detector</p>
+    <h1>Incidents</h1>
+    <p class="lede">Kafka keeps every log. Supabase keeps the incident and the handful of sample lines that justified it. This page reads those rows.</p>
+    <div class="path">
+      <div><strong>telemetry</strong><span>All logs, metrics, and tool calls. Kept 24 hours. Not copied to the database.</span></div>
+      <div><strong>anomalies</strong><span>One message when a rule trips. Partitioned by service and signal.</span></div>
+      <div><strong>incidents</strong><span>The row, the summary, and at most five error logs. This is the Supabase write.</span></div>
+    </div>
+    <p id="stats">Connecting…</p>
+    <div id="list"></div>
+  </main>
+  <script>
+    const list = document.querySelector("#list");
+    const stats = document.querySelector("#stats");
+
+    async function refresh() {
+      const [incidentResponse, statsResponse] = await Promise.all([
+        fetch("/api/incidents"),
+        fetch("/api/stats"),
+      ]);
+      const incidents = await incidentResponse.json();
+      const counts = await statsResponse.json();
+      if (!incidentResponse.ok) {
+        stats.textContent = counts.error || "The incident store is not ready.";
+        return;
+      }
+      stats.textContent = `${counts.store} · ${counts.incidents} incidents · ${counts.log_samples} log lines copied in`;
+      if (!incidents.length) {
+        list.innerHTML = `<div class="empty">Waiting for the first anomaly. A spike starts about 15 seconds after the producer boots.</div>`;
+        return;
+      }
+      list.innerHTML = incidents.map(render).join("");
+    }
+
+    function render(incident) {
+      const samples = incident.evidence || [];
+      const lines = samples.map((sample) => {
+        const payload = sample.payload || {};
+        const text = payload.body || `${payload.signal} = ${payload.value}`;
+        return `${sample.kind}  ${text}`;
+      }).join("\n");
+      return `
+        <article class="card">
+          <header>
+            <h2>${escape(incident.title)}</h2>
+            <span class="badge ${escape(incident.severity)}">${escape(incident.severity)} · ${escape(incident.status)}</span>
+          </header>
+          <p class="meta">${escape(incident.service)} · ${escape(incident.signal)} · summary from ${escape(incident.summary_source)}</p>
+          <p class="summary">${escape(incident.summary)}</p>
+          <pre>${escape(lines || "No samples stored.")}</pre>
+          <div class="actions">
+            <button data-id="${escape(incident.id)}" data-status="acknowledged" ${incident.status !== "open" ? "disabled" : ""}>Acknowledge</button>
+            <button class="secondary" data-id="${escape(incident.id)}" data-status="resolved" ${incident.status === "resolved" ? "disabled" : ""}>Resolve</button>
+          </div>
+        </article>`;
+    }
+
+    function escape(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[char]));
+    }
+
+    list.addEventListener("click", async (event) => {
+      const button = event.target.closest("button");
+      if (!button) return;
+      button.disabled = true;
+      await fetch(`/api/incidents/${button.dataset.id}/status`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: button.dataset.status }),
+      });
+      refresh();
+    });
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
