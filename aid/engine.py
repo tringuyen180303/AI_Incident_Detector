@@ -6,8 +6,9 @@ import time
 
 from confluent_kafka import Consumer
 
+from aid.alerts import alert_message, opened_key, publish_alert
 from aid.config import ANOMALY_TOPIC
-from aid.kafka import consumer_config, wait_for_broker
+from aid.kafka import consumer_config, producer, wait_for_broker
 from aid.store import make_store
 from aid.summary import summarize
 
@@ -19,6 +20,8 @@ def main() -> None:
     wait_for_broker()
     store = make_store()
     _wait_for_store(store)
+    writer = producer("aid-engine")
+    _announce_open(store, writer)
     reader = Consumer(consumer_config("incident-engine", "aid-engine"))
     reader.subscribe([ANOMALY_TOPIC])
     log.info("writing incidents to %s", store.name)
@@ -43,6 +46,9 @@ def main() -> None:
             else:
                 summary, summary_source = summarize(anomaly, prior)
             result = store.open_or_append(anomaly, summary, summary_source)
+            if result["created"] or not result.get("notified"):
+                _publish_opened(writer, anomaly, summary, result["id"])
+                store.mark_notified(result["id"])
         except Exception:
             log.exception("incident write failed; the anomaly will be read again")
             continue
@@ -53,6 +59,30 @@ def main() -> None:
             sum(1 for sample in anomaly["samples"] if sample["kind"] == "log"),
         )
         reader.commit(message=message)
+
+
+def _announce_open(store, writer) -> None:
+    for row in store.unnotified():
+        _publish_opened(writer, row, row["summary"], row["id"], status=row["status"])
+        store.mark_notified(row["id"])
+        log.info("announced open incident %s", row["id"])
+
+
+def _publish_opened(writer, source: dict, summary: str, incident_id: str, status: str = "open") -> None:
+    publish_alert(
+        writer,
+        alert_message(
+            key=opened_key(incident_id),
+            kind="opened",
+            incident_id=incident_id,
+            service=source["service"],
+            signal=source["signal"],
+            title=source["title"],
+            summary=summary,
+            severity=source["severity"],
+            status=status,
+        ),
+    )
 
 
 def _wait_for_store(store) -> None:

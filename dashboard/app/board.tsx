@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Incident, Stats } from "@/lib/incidents";
+import type { Incident, Notice, Stats } from "@/lib/incidents";
 
 type Filter = "open" | "acknowledged" | "resolved";
 
@@ -9,6 +9,7 @@ const FILTERS: Filter[] = ["open", "acknowledged", "resolved"];
 
 export function Board() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [notices, setNotices] = useState<Notice[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"loading" | "ready" | "offline">("loading");
@@ -19,22 +20,26 @@ export function Board() {
   const [now, setNow] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
-    const [incidentResponse, statsResponse] = await Promise.all([
+    const [incidentResponse, statsResponse, noticeResponse] = await Promise.all([
       fetch("/api/incidents", { cache: "no-store" }),
       fetch("/api/stats", { cache: "no-store" }),
+      fetch("/api/notifications", { cache: "no-store" }),
     ]);
     const incidentPayload = await incidentResponse.json();
     const statsPayload = await statsResponse.json();
+    const noticePayload = await noticeResponse.json();
     if (!incidentResponse.ok) {
       setPhase("offline");
       setError(incidentPayload.error || "The incident store is not ready.");
       setIncidents([]);
+      setNotices([]);
       setStats(null);
       return;
     }
     setPhase("ready");
     setError(null);
     setIncidents(incidentPayload);
+    setNotices(noticeResponse.ok && Array.isArray(noticePayload) ? noticePayload : []);
     setStats(statsResponse.ok ? statsPayload : null);
   }, []);
 
@@ -134,6 +139,14 @@ export function Board() {
         <Waiting />
       ) : (
         <div className="workspace">
+          <Alerts
+            notices={notices}
+            now={now}
+            onOpen={(id) => {
+              setFilter("all");
+              setSelectedId(id);
+            }}
+          />
           <div className="list" role="listbox" aria-label="Incidents">
             {visible.length === 0 ? (
               <p className="hint" style={{ padding: "12px" }}>
@@ -258,6 +271,40 @@ function Detail({
   );
 }
 
+function Alerts({
+  notices,
+  now,
+  onOpen,
+}: {
+  notices: Notice[];
+  now: number | null;
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <section className="alerts" aria-label="Alerts">
+      <p className="eyebrow">Alerts</p>
+      {notices.length === 0 ? (
+        <p className="hint">Notify workers deliver an alert when an incident opens or changes status.</p>
+      ) : (
+        <div className="alert-row">
+          {notices.map((notice) => (
+            <button key={notice.id} type="button" className="alert" onClick={() => onOpen(notice.incident_id)}>
+              <span className={`kind ${notice.severity}`}>{noticeLabel(notice)}</span>
+              <span className="alert-title">{notice.title}</span>
+              <span className="when">{now ? ago(notice.created_at, now) : ""}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function noticeLabel(notice: Notice): string {
+  if (notice.kind === "opened") return "Opened";
+  return notice.status;
+}
+
 function Waiting() {
   return (
     <section className="empty">
@@ -281,14 +328,13 @@ function Offline({ message }: { message: string }) {
       <ol className="steps">
         <li>
           <span>
-            From the repo root, run <code>docker compose up --build</code>. That starts Kafka, the detector, and the
-            incident API on port 8080.
+            From the repo root, run <code>docker compose up --build</code>. That starts Kafka, the detector, the
+            incident API, and the notify workers.
           </span>
         </li>
         <li>
           <span>
-            In another terminal, run <code>cd dashboard && npm install && npm run dev</code>. This page is{" "}
-            <code>http://localhost:3000</code>.
+            In another terminal, run <code>cd dashboard && npm install && npm run dev</code>.
           </span>
         </li>
         <li>
@@ -305,10 +351,9 @@ function About() {
     <details className="about">
       <summary>Where the rows come from</summary>
       <p>
-        Every log stays on the Kafka topic <code>telemetry</code> for 24 hours. This board reads only incident rows:
-        one per open service and signal, plus at most five error lines. On this machine the rows sit in local
-        Postgres. A Vercel deploy reads the same tables from Supabase, because Vercel cannot see the Kafka broker on
-        your laptop.
+        Every log stays on the Kafka topic <code>telemetry</code> for 24 hours. This board reads incident rows and
+        the alerts the notify workers deliver. One open row per service and signal, plus at most five error lines.
+        Deployed, the same tables live in Supabase.
       </p>
     </details>
   );

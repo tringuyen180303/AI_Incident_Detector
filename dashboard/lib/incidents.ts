@@ -32,6 +32,20 @@ export type Stats = {
   log_samples: number;
 };
 
+export type Notice = {
+  id: string;
+  incident_id: string;
+  kind: string;
+  channel: string;
+  service: string;
+  signal: string;
+  title: string;
+  summary: string;
+  severity: string;
+  status: string;
+  created_at: string;
+};
+
 const STATUSES = new Set(["open", "acknowledged", "resolved"]);
 
 function supabaseEnv(): { url: string; key: string } | null {
@@ -56,6 +70,20 @@ export async function listIncidents(): Promise<Incident[]> {
     throw new Error("Incident API returned an unexpected payload");
   }
   return payload as Incident[];
+}
+
+export async function listNotifications(): Promise<Notice[]> {
+  if (supabaseEnv()) {
+    const rows = (await supabaseFetch(
+      "/notifications?select=id,incident_id,kind,channel,service,signal,title,summary,severity,status,created_at&channel=eq.board&order=created_at.desc&limit=20",
+    )) as Notice[] | null;
+    return rows || [];
+  }
+  const payload = await apiJson("/api/notifications");
+  if (!Array.isArray(payload)) {
+    throw new Error("Incident API returned an unexpected payload");
+  }
+  return payload as Notice[];
 }
 
 export async function readStats(): Promise<Stats> {

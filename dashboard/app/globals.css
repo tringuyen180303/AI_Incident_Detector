@@ -163,6 +163,42 @@ h1 {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(280px, 380px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.alerts {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.alert-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.alert {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.alert-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
 }
 
 .list, .detail {
@@ -414,6 +450,7 @@ code {
   .counts { display: grid; grid-template-columns: repeat(3, 1fr); }
   .counts button { min-width: 0; }
   .workspace { grid-template-columns: 1fr; }
+  .alerts { grid-template-columns: 1fr; align-items: start; }
   .list { border-right: 0; border-bottom: 1px solid var(--line); max-height: 42vh; }
   .detail { padding: 20px 16px 40px; }
   .detail h2 { font-size: 32px; }

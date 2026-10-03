@@ -25,6 +25,9 @@ class PostgresStore:
         self.url = url
 
     def ping(self) -> None:
+        with self._connect() as conn:
+            for statement in _NOTIFICATIONS_SCHEMA:
+                conn.execute(statement)
         self.stats()
 
     def stats(self) -> dict:
@@ -109,7 +112,7 @@ class PostgresStore:
                     updated_at = now(),
                     resolved_at = case when %s = 'resolved' then now() else null end
                 where id = %s
-                returning id::text, status
+                returning id::text, status, service, signal, title, summary, severity
                 """,
                 (status, status, incident_id),
             ).fetchone()
@@ -118,11 +121,79 @@ class PostgresStore:
             _event(conn, incident_id, "status_changed", {"status": status}, actor="dashboard")
         return dict(row)
 
+    def unnotified(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select id::text, service, signal, title, summary, severity, status
+                from incidents
+                where notified_at is null and status = 'open'
+                order by created_at desc
+                limit 20
+                """
+            ).fetchall()
+        return [_plain(row) for row in rows]
+
+    def mark_notified(self, incident_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "update incidents set notified_at = now() where id = %s and notified_at is null",
+                (incident_id,),
+            )
+
+    def record_notification(self, alert: dict, channel: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into notifications (
+                  notification_key, incident_id, kind, channel,
+                  service, signal, title, summary, severity, status
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (notification_key, channel) do nothing
+                """,
+                (
+                    alert["notification_key"],
+                    alert["incident_id"],
+                    alert["kind"],
+                    channel,
+                    alert["service"],
+                    alert["signal"],
+                    alert["title"],
+                    alert["summary"],
+                    alert["severity"],
+                    alert["status"],
+                ),
+            )
+
+    def list_notifications(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select
+                  id::text,
+                  incident_id::text,
+                  kind,
+                  channel,
+                  service,
+                  signal,
+                  title,
+                  summary,
+                  severity,
+                  status,
+                  created_at
+                from notifications
+                where channel = 'board'
+                order by created_at desc
+                limit 20
+                """
+            ).fetchall()
+        return [_plain(row) for row in rows]
+
     def _write(self, anomaly: dict, summary: str, summary_source: str, append_only: bool = False) -> dict:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                select id::text
+                select id::text, notified_at
                 from incidents
                 where service = %s and signal = %s and status = 'open'
                 for update
@@ -139,7 +210,7 @@ class PostgresStore:
                 )
                 if added:
                     _event(conn, row["id"], "evidence_appended", {"count": added}, actor="incident-engine")
-                return {"id": row["id"], "created": False}
+                return {"id": row["id"], "created": False, "notified": row["notified_at"] is not None}
 
             inserted = conn.execute(
                 """
@@ -163,7 +234,7 @@ class PostgresStore:
             ).fetchone()
             _insert_evidence(conn, inserted["id"], anomaly["samples"])
             _event(conn, inserted["id"], "created", {"summary_source": summary_source}, actor="incident-engine")
-            return {"id": inserted["id"], "created": True}
+            return {"id": inserted["id"], "created": True, "notified": False}
 
     def _connect(self):
         return psycopg.connect(self.url, row_factory=dict_row)
@@ -210,7 +281,7 @@ class SupabaseStore:
     def open_or_append(self, anomaly: dict, summary: str, summary_source: str, _retry: bool = True) -> dict:
         existing = self._json(
             "GET",
-            f"/incidents?select=id&service=eq.{_query(anomaly['service'])}&signal=eq.{_query(anomaly['signal'])}&status=eq.open&limit=1",
+            f"/incidents?select=id,notified_at&service=eq.{_query(anomaly['service'])}&signal=eq.{_query(anomaly['signal'])}&status=eq.open&limit=1",
         )
         if existing:
             incident_id = existing[0]["id"]
@@ -222,7 +293,11 @@ class SupabaseStore:
             )
             if added:
                 self._add_event(incident_id, "evidence_appended", {"count": added})
-            return {"id": incident_id, "created": False}
+            return {
+                "id": incident_id,
+                "created": False,
+                "notified": existing[0].get("notified_at") is not None,
+            }
 
         try:
             inserted = self._json(
@@ -248,7 +323,7 @@ class SupabaseStore:
         incident_id = inserted[0]["id"]
         self._add_evidence(incident_id, anomaly["samples"])
         self._add_event(incident_id, "created", {"summary_source": summary_source})
-        return {"id": incident_id, "created": True}
+        return {"id": incident_id, "created": True, "notified": False}
 
     def set_status(self, incident_id: str, status: str) -> dict | None:
         if status not in {"acknowledged", "resolved", "open"}:
@@ -265,7 +340,59 @@ class SupabaseStore:
         if not rows:
             return None
         self._add_event(incident_id, "status_changed", {"status": status}, actor="dashboard")
-        return {"id": incident_id, "status": status}
+        row = rows[0]
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "service": row["service"],
+            "signal": row["signal"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "severity": row["severity"],
+        }
+
+    def unnotified(self) -> list[dict]:
+        return self._json(
+            "GET",
+            "/incidents?select=id,service,signal,title,summary,severity,status"
+            "&notified_at=is.null&status=eq.open&order=created_at.desc&limit=20",
+        )
+
+    def mark_notified(self, incident_id: str) -> None:
+        self._json(
+            "PATCH",
+            f"/incidents?id=eq.{incident_id}&notified_at=is.null",
+            {"notified_at": _now()},
+        )
+
+    def record_notification(self, alert: dict, channel: str) -> None:
+        try:
+            self._json(
+                "POST",
+                "/notifications",
+                {
+                    "notification_key": alert["notification_key"],
+                    "incident_id": alert["incident_id"],
+                    "kind": alert["kind"],
+                    "channel": channel,
+                    "service": alert["service"],
+                    "signal": alert["signal"],
+                    "title": alert["title"],
+                    "summary": alert["summary"],
+                    "severity": alert["severity"],
+                    "status": alert["status"],
+                },
+            )
+        except RestError as exc:
+            if exc.status != 409:
+                raise
+
+    def list_notifications(self) -> list[dict]:
+        return self._json(
+            "GET",
+            "/notifications?select=id,incident_id,kind,channel,service,signal,title,summary,severity,status,created_at"
+            "&channel=eq.board&order=created_at.desc&limit=20",
+        )
 
     def _add_evidence(self, incident_id: str, samples: list[dict]) -> int:
         existing = self._json(
@@ -359,6 +486,28 @@ class _Response:
         self.status = status
         self.headers = headers
         self.data = data
+
+
+_NOTIFICATIONS_SCHEMA = (
+    "alter table incidents add column if not exists notified_at timestamptz",
+    """
+    create table if not exists notifications (
+      id uuid primary key default gen_random_uuid(),
+      notification_key text not null,
+      incident_id uuid not null references incidents (id) on delete cascade,
+      kind text not null check (kind in ('opened', 'status_changed')),
+      channel text not null check (channel in ('board', 'webhook')),
+      service text not null,
+      signal text not null,
+      title text not null,
+      summary text not null,
+      severity text not null,
+      status text not null,
+      created_at timestamptz not null default now(),
+      unique (notification_key, channel)
+    )
+    """,
+)
 
 
 def _insert_evidence(conn, incident_id: str, samples: list[dict]) -> int:

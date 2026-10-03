@@ -28,6 +28,24 @@ create table incident_evidence (
   payload jsonb not null
 );
 
+alter table incidents add column if not exists notified_at timestamptz;
+
+create table if not exists notifications (
+  id uuid primary key default gen_random_uuid(),
+  notification_key text not null,
+  incident_id uuid not null references incidents (id) on delete cascade,
+  kind text not null check (kind in ('opened', 'status_changed')),
+  channel text not null check (channel in ('board', 'webhook')),
+  service text not null,
+  signal text not null,
+  title text not null,
+  summary text not null,
+  severity text not null,
+  status text not null,
+  created_at timestamptz not null default now(),
+  unique (notification_key, channel)
+);
+
 create table incident_events (
   id uuid primary key default gen_random_uuid(),
   incident_id uuid not null references incidents (id) on delete cascade,

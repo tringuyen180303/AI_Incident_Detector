@@ -6,23 +6,28 @@ Kafka keeps the stream. Postgres, or Supabase when you set the keys, keeps the i
 
 ```mermaid
 flowchart LR
-  apps["Apps, agents, hosts"] --> otel["OpenTelemetry\nlocalhost:4318"]
+  apps["Apps, agents, hosts"] --> otel["OpenTelemetry collector"]
   demo["Demo publisher"] --> telemetry
   otel --> otlp["otlp.logs\nmetrics, traces"]
   otlp --> telemetry["Kafka telemetry\nkept 24 hours"]
-  telemetry --> detect["Detector\n30-second window"]
+  telemetry --> detect["Detector workers\n30-second window"]
   detect --> anomalies["anomalies\nkept 7 days"]
   anomalies --> engine["Incident engine"]
   engine --> model["gpt-5-nano"]
-  engine --> db["Postgres or Supabase"]
+  engine --> notes["notifications\nkept 7 days"]
+  notes --> boardWorkers["notify-board workers"]
+  notes --> hookWorkers["notify-webhook workers"]
+  boardWorkers --> db["Postgres or Supabase"]
+  hookWorkers --> hook["Your webhook"]
+  engine --> db
   db --> board["Next.js board"]
 ```
 
-The demo publisher is what fills the board today. A real service joins the same path by exporting OTLP to `localhost:4318`. The collector is already listening.
+The demo publisher is what fills the board today. A real service joins the same path by exporting OTLP to the collector. The collector is already listening.
 
 ## What you see
 
-Open [http://localhost:3000](http://localhost:3000) after the two commands below. The left column is the live list. The right column is the incident: severity, the two-sentence summary, the measured value, and the sample lines that justified the row.
+Open the board after the two commands below. An alert rail sits across the top. The left column is the live list. The right column is the incident: severity, the two-sentence summary, the measured value, and the sample lines that justified the row.
 
 Three counts sit in the header. Click one to filter. **Acknowledge** and **Resolve** write straight back to the incident row.
 
@@ -42,6 +47,25 @@ While the incident stays open, later breaches append evidence and keep the first
 
 With `OPENAI_API_KEY` unset, the summary is one fixed sentence and the page says `template`.
 
+## Alerts
+
+Opening an incident, or changing its status, publishes one message on the `notifications` topic. Two consumer groups read that topic independently:
+
+| Worker | Group | What it does |
+| --- | --- | --- |
+| `notify-board` | `notify-board` | Writes the alert the board shows |
+| `notify-webhook` | `notify-webhook` | POSTs the same alert to `NOTIFY_WEBHOOK_URL` |
+
+Each message is keyed by `service|signal`, so one worker owns a service's alerts in order. Add copies with:
+
+```bash
+docker compose up --build --scale notify-board=2 --scale notify-webhook=2
+```
+
+Kafka gives each copy different partitions. A slow webhook does not hold up the board, because the groups move separately. The same alert key is stored once per channel, so a retry does not page you twice.
+
+Set `NOTIFY_WEBHOOK_URL` in `.env` to a Slack, PagerDuty, or any incoming webhook. With it unset, the webhook worker logs the alert and moves on.
+
 ## Run
 
 ```bash
@@ -56,7 +80,7 @@ npm run dev
 
 Copy `.env.example` to `.env` and set `OPENAI_API_KEY` if you want the model to write the summaries. The key stays in `.env`, which is gitignored.
 
-Stop the board with Ctrl-C. Stop the pipeline with Ctrl-C, then `docker compose down`. The engine also serves an older page at [http://localhost:8080](http://localhost:8080). The Next.js app is the one to use.
+Stop the board with Ctrl-C. Stop the pipeline with Ctrl-C, then `docker compose down`. The Next.js app is the board to use. The `api` service also keeps an older page.
 
 ## Where a log goes
 
@@ -85,13 +109,11 @@ npx vercel
 npx vercel --prod
 ```
 
-With the Supabase keys unset, `npm run dev` keeps reading the local engine.
+With the Supabase keys unset, `npm run dev` keeps reading the engine started by compose.
 
 ## Point a real service at it
 
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-```
+Point `OTEL_EXPORTER_OTLP_ENDPOINT` at the collector. Compose publishes the collector's OTLP port.
 
 The collector writes Kafka. The normalizer re-keys each record by `service.name` onto `telemetry`. GenAI spans that carry `gen_ai.tool.name` become tool-call events, which is how a real agent shows up as retries. Host CPU from the collector becomes `cpu.utilization`.
 
@@ -104,6 +126,7 @@ Scale the topic that is big. Keep the database on the topic that is small.
 | `otlp.logs`, `otlp.metrics`, `otlp.traces` | none required | 6 | `normalizer` | Add normalizer processes. They are stateless. |
 | `telemetry` | service name | 12 | `detector` | Add detectors, up to the partition count. |
 | `anomalies` | `service\|signal` | 3 | `incident-engine` | One process is enough until the model or Postgres is the slow part. |
+| `notifications` | `service\|signal` | 6 | `notify-board`, `notify-webhook` | Scale each group on its own. |
 
 Every record for `billing-agent` uses that service as the key, so the whole service lands on one partition and one detector owns its 30-second window. That is why the window can live in memory. Raise `TELEMETRY_PARTITIONS` before the topic is created. More detectors than partitions sit idle. One detector can own several partitions.
 

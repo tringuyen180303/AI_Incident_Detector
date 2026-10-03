@@ -7,6 +7,7 @@ x-python: &python
     SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-nano}
+    NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
     TELEMETRY_PARTITIONS: ${TELEMETRY_PARTITIONS:-12}
     ANOMALY_PARTITIONS: ${ANOMALY_PARTITIONS:-3}
   depends_on:
@@ -80,6 +81,14 @@ services:
   engine:
     <<: *python
     command: python -m aid.engine
+
+  notify-board:
+    <<: *python
+    command: python -m aid.notify board
+
+  notify-webhook:
+    <<: *python
+    command: python -m aid.notify webhook
 
   api:
     <<: *python

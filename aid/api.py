@@ -5,7 +5,9 @@ import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from aid.alerts import alert_message, publish_alert, status_key
 from aid.config import API_PORT, ROOT
+from aid.kafka import producer, wait_for_broker
 from aid.store import make_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -13,6 +15,7 @@ log = logging.getLogger("aid.api")
 
 STORE = make_store()
 PAGE = (ROOT / "web" / "index.html").read_bytes()
+WRITER = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -29,6 +32,9 @@ class Handler(BaseHTTPRequestHandler):
                 stats = STORE.stats()
                 stats["note"] = "log_samples counts evidence rows, not the Kafka topic"
                 self._json(200, stats)
+                return
+            if path == "/api/notifications":
+                self._json(200, STORE.list_notifications())
                 return
         except Exception as exc:
             log.exception("read failed")
@@ -49,6 +55,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if updated is None:
                 self._json(404, {"error": "incident not found"})
+                return
+            try:
+                publish_alert(
+                    WRITER,
+                    alert_message(
+                        key=status_key(updated["id"], updated["status"]),
+                        kind="status_changed",
+                        incident_id=updated["id"],
+                        service=updated["service"],
+                        signal=updated["signal"],
+                        title=updated["title"],
+                        summary=updated["summary"],
+                        severity=updated["severity"],
+                        status=updated["status"],
+                    ),
+                )
+            except Exception:
+                log.exception("alert publish failed")
+                self._json(503, {"error": "status saved, the alert was not delivered"})
                 return
             self._json(200, updated)
             return
@@ -73,8 +98,11 @@ def main() -> None:
         STORE.ping()
     except Exception as exc:
         log.warning("database not ready yet: %s", exc)
+    global WRITER
+    wait_for_broker()
+    WRITER = producer("aid-api")
     server = ThreadingHTTPServer(("0.0.0.0", API_PORT), Handler)
-    log.info("incident board on http://localhost:%s", API_PORT)
+    log.info("incident api listening on port %s", API_PORT)
     server.serve_forever()
 
 
